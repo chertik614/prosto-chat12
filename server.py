@@ -1,38 +1,58 @@
-import os
-import socket
-import threading
-from config import PORT
+import asyncio
+import websockets
+import json
 
-clients = []
+PORT = 9090
+clients = {}  # {websocket: {"name": str, "color": [r,g,b], "pos": [x,y], "typing": bool}}
+chat_log = []
 
-def broadcast(msg, sender):
-    for c in clients:
-        if c != sender:
-            try:
-                c.send(msg)
-            except:
-                clients.remove(c)
+async def notify_all():
+    """Отправить всем текущее состояние"""
+    if clients:
+        state = {
+            "players": {id(ws): data for ws, data in clients.items()},
+            "chat": chat_log,
+        }
+        message = json.dumps(state)
+        await asyncio.wait([ws.send(message) for ws in clients])
 
-def handle_client(client):
-    while True:
-        try:
-            msg = client.recv(1024)
-            broadcast(msg, client)
-        except:
-            clients.remove(client)
-            client.close()
-            break
+async def handler(websocket):
+    try:
+        # первый пакет = регистрация
+        data = await websocket.recv()
+        data = json.loads(data)
+        clients[websocket] = {
+            "name": data["name"],
+            "color": data["color"],
+            "pos": [400, 300],
+            "typing": False
+        }
+        await notify_all()
 
-def chat_server():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(('', PORT))
-    server.listen()
-    print(f"[SERVER] Chat started on port {PORT}")
-    while True:
-        client, addr = server.accept()
-        print(f"[NEW] {addr}")
-        clients.append(client)
-        threading.Thread(target=handle_client, args=(client,), daemon=True).start()
+        async for message in websocket:
+            packet = json.loads(message)
 
-if __name__ == "__main__":
-    chat_server()
+            if packet["type"] == "pos":
+                clients[websocket]["pos"] = packet["pos"]
+
+            elif packet["type"] == "chat":
+                chat_log.append((clients[websocket]["name"], packet["msg"]))
+                chat_log[:] = chat_log[-10:]
+
+            elif packet["type"] == "typing":
+                clients[websocket]["typing"] = packet["status"]
+
+            await notify_all()
+    except:
+        pass
+    finally:
+        if websocket in clients:
+            del clients[websocket]
+            await notify_all()
+
+async def main():
+    async with websockets.serve(handler, "0.0.0.0", PORT):
+        print(f"[SERVER] WebSocket сервер запущен на порту {PORT}")
+        await asyncio.Future()  # бесконечный await
+
+asyncio.run(main())
